@@ -1,0 +1,3 @@
+# Vendored into ./python by the s.yaml pre-deploy action (manylinux wheels for FC's Linux runtime).
+# oss2 is preinstalled in the FC Python 3.10 runtime, so it is not vendored here.
+Pillow==10.4.0

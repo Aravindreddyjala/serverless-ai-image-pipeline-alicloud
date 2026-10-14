@@ -1,0 +1,112 @@
+ROSTemplateFormatVersion: "2015-09-01"
+Description: Shared infrastructure for the serverless AI image pipeline (OSS bucket + RAM roles).
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique name of the OSS bucket that stores raw, processed and metadata objects.
+    AllowedPattern: "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"
+  NamePrefix:
+    Type: String
+    Description: Prefix used for RAM roles, RAM policies and function names.
+    AllowedPattern: "^[a-zA-Z0-9-]{1,40}$"
+
+Resources:
+  ImageBucket:
+    Type: ALIYUN::OSS::Bucket
+    Properties:
+      BucketName:
+        Ref: BucketName
+      AccessControl: private
+      ServerSideEncryptionConfiguration:
+        SSEAlgorithm: AES256
+
+  # Execution role assumed by both functions (exposed to code via context.credentials).
+  FunctionRole:
+    Type: ALIYUN::RAM::Role
+    Properties:
+      RoleName:
+        Fn::Join: ["-", [Ref: NamePrefix, "fc-role"]]
+      Description: Execution role for the image pipeline functions.
+      AssumeRolePolicyDocument:
+        Version: "1"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - fc.aliyuncs.com
+      Policies:
+        - PolicyName:
+            Fn::Join: ["-", [Ref: NamePrefix, "fc-oss-access"]]
+          PolicyDocument:
+            Version: "1"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - oss:GetObject
+                  - oss:PutObject
+                  - oss:GetObjectMeta
+                Resource:
+                  - Fn::Join: ["", ["acs:oss:*:*:", Ref: BucketName, "/*"]]
+              - Effect: Allow
+                Action:
+                  - oss:GetBucketInfo
+                Resource:
+                  - Fn::Join: ["", ["acs:oss:*:*:", Ref: BucketName]]
+        - PolicyName:
+            Fn::Join: ["-", [Ref: NamePrefix, "fc-log-write"]]
+          PolicyDocument:
+            Version: "1"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - log:PostLogStoreLogs
+                Resource:
+                  - acs:log:*:*:project/*/logstore/*
+
+  # Role OSS assumes to invoke the functions when an event fires.
+  OssInvocationRole:
+    Type: ALIYUN::RAM::Role
+    Properties:
+      RoleName:
+        Fn::Join: ["-", [Ref: NamePrefix, "oss-invoke-role"]]
+      Description: Allows OSS event notifications to invoke the image pipeline functions.
+      AssumeRolePolicyDocument:
+        Version: "1"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - oss.aliyuncs.com
+      Policies:
+        - PolicyName:
+            Fn::Join: ["-", [Ref: NamePrefix, "oss-invoke-fc"]]
+          PolicyDocument:
+            Version: "1"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - fc:InvokeFunction
+                Resource:
+                  - Fn::Join:
+                      - ""
+                      - - "acs:fc:"
+                        - Ref: ALIYUN::Region
+                        - ":"
+                        - Ref: ALIYUN::TenantId
+                        - ":functions/"
+                        - Ref: NamePrefix
+                        - "-*"
+
+Outputs:
+  BucketName:
+    Value:
+      Fn::GetAtt: [ImageBucket, Name]
+  FunctionRoleArn:
+    Value:
+      Fn::GetAtt: [FunctionRole, Arn]
+  OssInvocationRoleArn:
+    Value:
+      Fn::GetAtt: [OssInvocationRole, Arn]

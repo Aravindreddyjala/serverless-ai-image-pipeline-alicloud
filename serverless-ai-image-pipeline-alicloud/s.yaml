@@ -1,0 +1,122 @@
+# Serverless Devs 3.x application: OSS -> FC (Pillow) -> OSS -> FC (Qwen-VL) pipeline.
+# Deploy with:  s deploy -y
+edition: 3.0.0
+name: serverless-ai-image-pipeline
+access: default
+
+vars:
+  region: ${env('ALIBABA_CLOUD_REGION', 'ap-southeast-1')}
+  namePrefix: img-pipeline
+  bucketName: ${vars.namePrefix}-${config('AccountID')}-${vars.region}
+  dashscopeBaseUrl: ${env('DASHSCOPE_BASE_URL', 'https://dashscope-intl.aliyuncs.com/api/v1')}
+
+resources:
+  # OSS bucket + RAM roles via Alibaba Cloud ROS (fc3 does not manage buckets or roles itself).
+  infra:
+    component: ros
+    props:
+      region: ${vars.region}
+      name: ${vars.namePrefix}-infra
+      template: ./infra/ros-template.yml
+      parameters:
+        BucketName: ${vars.bucketName}
+        NamePrefix: ${vars.namePrefix}
+
+  processor:
+    component: fc3
+    actions:
+      pre-deploy:
+        - run: >-
+            pip install -r requirements.txt -t ./python --upgrade --no-compile
+            --platform manylinux2014_x86_64 --implementation cp --python-version 3.10 --only-binary=:all:
+          path: ./src/processor
+    props:
+      region: ${vars.region}
+      functionName: ${vars.namePrefix}-processor
+      description: Resizes and compresses images uploaded to raw/ and writes them to processed/.
+      runtime: python3.10
+      handler: index.handler
+      code: ./src/processor
+      memorySize: 1024
+      cpu: 1
+      diskSize: 512
+      timeout: 120
+      instanceConcurrency: 1
+      internetAccess: false
+      role: ${resources.infra.output.FunctionRoleArn}
+      logConfig: auto
+      environmentVariables:
+        PYTHONPATH: /code/python
+        SOURCE_PREFIX: raw/
+        TARGET_PREFIX: processed/
+        MAX_DIMENSION: "1600"
+        OUTPUT_FORMAT: JPEG
+        OUTPUT_QUALITY: "82"
+        LOG_LEVEL: INFO
+      triggers:
+        - triggerName: oss-raw-upload
+          triggerType: oss
+          qualifier: LATEST
+          invocationRole: ${resources.infra.output.OssInvocationRoleArn}
+          sourceArn: acs:oss:${vars.region}:${config('AccountID')}:${resources.infra.output.BucketName}
+          triggerConfig:
+            events:
+              - oss:ObjectCreated:PutObject
+              - oss:ObjectCreated:PostObject
+              - oss:ObjectCreated:CompleteMultipartUpload
+              - oss:ObjectCreated:CopyObject
+            filter:
+              key:
+                prefix: raw/
+                suffix: ""
+
+  analyzer:
+    component: fc3
+    actions:
+      pre-deploy:
+        - run: >-
+            pip install -r requirements.txt -t ./python --upgrade --no-compile
+            --platform manylinux2014_x86_64 --implementation cp --python-version 3.10 --only-binary=:all:
+          path: ./src/analyzer
+    props:
+      region: ${vars.region}
+      functionName: ${vars.namePrefix}-analyzer
+      description: Generates tags and alt-text for processed images with Qwen-VL (DashScope).
+      runtime: python3.10
+      handler: index.handler
+      code: ./src/analyzer
+      memorySize: 512
+      cpu: 0.35
+      diskSize: 512
+      timeout: 120
+      instanceConcurrency: 1
+      # Required to reach the DashScope API endpoint.
+      internetAccess: true
+      role: ${resources.infra.output.FunctionRoleArn}
+      logConfig: auto
+      environmentVariables:
+        PYTHONPATH: /code/python
+        SOURCE_PREFIX: processed/
+        METADATA_PREFIX: metadata/
+        WRITE_METADATA: "true"
+        QWEN_VL_MODEL: ${env('QWEN_VL_MODEL', 'qwen-vl-plus')}
+        DASHSCOPE_BASE_URL: ${vars.dashscopeBaseUrl}
+        DASHSCOPE_API_KEY: ${env('DASHSCOPE_API_KEY')}
+        MAX_TAGS: "10"
+        LOG_LEVEL: INFO
+      triggers:
+        - triggerName: oss-processed-upload
+          triggerType: oss
+          qualifier: LATEST
+          invocationRole: ${resources.infra.output.OssInvocationRoleArn}
+          sourceArn: acs:oss:${vars.region}:${config('AccountID')}:${resources.infra.output.BucketName}
+          triggerConfig:
+            events:
+              - oss:ObjectCreated:PutObject
+              - oss:ObjectCreated:PostObject
+              - oss:ObjectCreated:CompleteMultipartUpload
+              - oss:ObjectCreated:CopyObject
+            filter:
+              key:
+                prefix: processed/
+                suffix: ""
